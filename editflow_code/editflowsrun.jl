@@ -42,7 +42,7 @@ function make_minibatch(B::Int, P::FF.EditFlow; rng=Random.default_rng())
         seq1 = sample(PM; rng=rng)
         @assert all(1 .<= seq1 .<= K)
         x1s[b] = FF.DiscreteState(K, seq1)
-        # x0: uniform tokens with random length in 10:30 (no BOS in x0)
+        # x0: uniform tokens with random length in 1:10 (no BOS in x0)
         L0 = rand(rng, 1:10)
         seq0 = rand(rng, 1:K, L0)
         x0s[b] = FF.DiscreteState(K, seq0)
@@ -140,7 +140,6 @@ function train_editflow!(P::FF.EditFlow,
             Tmask_d = to_dev(transition_mask)
             Emult_d = to_dev(edit_multiplier)
             sched_d = to_dev(reshape(Float32.(scheduler_scaling), 1, 1, :))
-            #print("RE???")
 
             # 4) Forward + loss + update (on device)
             loss, grad = Flux.withgradient(model) do m

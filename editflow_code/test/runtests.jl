@@ -1,9 +1,9 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
-#Pkg.instantiate()
+Pkg.instantiate()
+Pkg.develop(path=joinpath(@__DIR__, "..", ".."))
 using Flowfusion
 const FF = Flowfusion
-
 using Test
 
 @testset "EditFlow remaining_edits, transition mask, remove/pad, loss" begin
@@ -23,16 +23,8 @@ using Test
     expected[10,3,1] = 1
     got = FF.remaining_edits(P, Zt, Z1)
 
-    display("HEJ")
-    display(findall(!iszero, got))
-    display(findall(!iszero, expected))
-
-    display(got[20,2,1])
-    display(got[10,3,1])
-    display(size(got))
-    display(size(expected))
     @test got == expected
-#=
+
     # Two-column case with inserts/subs
     Zt = [0 0; 7 23; 15 15; 15 15; 23 4; 2 2; 22 22;]
     Z1 = [0 0; 7 7; 20 20; 20 20; 5 4; 10 10; 22 22;]
@@ -101,19 +93,6 @@ using Test
     zero_indices = findall(x -> x == 0, got)
     #@info "Indices in 'got' that are zero:" zero_indices
     @test got == expected
-    =#
-#=
-    # ─────────────────────────────────────────────────────────────────────
-    # remove_and_pad_concise
-    Zt = [0 3 2;
-          9 23 2;
-          23 23 3;
-          0 2 23]
-    expected = [0 3 2;
-                9 2 2;
-                0 22 3]
-    got = Flowfusion.remove_and_pad_concise(Zt, P.latent_token, P.padding_token)
-    @test got == expected
 
     # ─────────────────────────────────────────────────────────────────────
     # loss equivalence under identity transform
@@ -128,7 +107,6 @@ using Test
     got = Flowfusion.edit_loss(P, M, transition_mask, edit_multiplier, scheduler_scaling; op_mask=nothing, eps=0)
     @test isapprox(got, l; atol=1e-7, rtol=1e-7)
 
-    =#
 end
 
 

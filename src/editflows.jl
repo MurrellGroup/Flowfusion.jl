@@ -137,7 +137,7 @@ function remaining_edits(P::EditFlow, Zt::Matrix{Int}, Z1::Matrix{Int}, dense=fa
     
     #Insert 
     #inserts = Z1.*(Zt .== latent_token)
-    inserts = Int64.((Zt .== latent_token) .& (1 .≤ Z1 .≤ tokens))
+    inserts = Z1 .* Int64.((Zt .== latent_token) .& (1 .≤ Z1 .≤ tokens))
     insert_edits = zeros(Float32, (tokens, batch_length, batch_size))
     insert_indices = findall(!iszero, inserts)
     insert_cols_to_update = pos[insert_indices]
