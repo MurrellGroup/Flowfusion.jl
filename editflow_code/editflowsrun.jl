@@ -164,7 +164,7 @@ function train_editflow!(P::FF.EditFlow,
     return Functors.fmap(to_cpu, model)
 end
 
-# Run training + sampling + CE
+# PM is the target probability model and K is the alphabet size
 K = PM.K
 
 P = FF.EditFlow(K; bos_token=0)
