@@ -1,7 +1,7 @@
 name = "Flowfusion"
 uuid = "5b4e93c8-7b6e-4682-b400-fc3b238f52b1"
 authors = ["murrellb <murrellb@gmail.com> and contributors"]
-version = "0.1.4"
+version = "0.1.5"
 
 [deps]
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"

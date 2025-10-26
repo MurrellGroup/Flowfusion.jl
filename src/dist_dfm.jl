@@ -126,24 +126,23 @@ function bridge(p::DistNoisyInterpolatingDiscreteFlow,
     return Xt
 end
 
+#Note: x0 here is the state at time=t0.
 function bridge(p::DistNoisyInterpolatingDiscreteFlow,
                 x0::DiscreteState{<:AbstractArray{<:Signed}},
                 x1::DiscreteState{<:AbstractArray{<:Signed}},
                 t0, t)
     D   = size(x0.state)
-    ts0 = expand(t0, ndims(x0.state))   # time/batch broadcast shape (or scalar)
+    ts0 = expand(t0, ndims(x0.state))
     tst = expand(t,  ndims(x0.state))
     κ1_0, κ2_0 = κ1(p, ts0), κ2(p, ts0)
     κ1_t, κ2_t = κ1(p, tst),  κ2(p, tst)
     κ3_0, κ3_t = 1 .- κ1_0 .- κ2_0, 1 .- κ1_t .- κ2_t
     T  = κ3_0 isa AbstractArray ? eltype(κ3_0) : typeof(κ3_0)
     ϵ  = eps(T)
-    denom = max.(κ3_0, ϵ)  # conditioning on being on X0-track at t0
-    # Closed-form conditional weights given we're on the X0-track at t0
+    denom = max.(κ3_0, ϵ)
     w3_raw = κ3_t ./ denom
     w1_raw = (κ1_t .* denom .- κ1_0 .* κ3_t) ./ denom
     w2_raw = (κ2_t .* denom .- κ2_0 .* κ3_t) ./ denom
-    # Numerical hygiene: clip tiny negatives, then renormalize
     z = zero(T)
     w1_raw = max.(w1_raw, z)
     w2_raw = max.(w2_raw, z)
@@ -152,8 +151,6 @@ function bridge(p::DistNoisyInterpolatingDiscreteFlow,
     s  = max.(s, ϵ)
     w1 = w1_raw ./ s
     w2 = w2_raw ./ s
-    # w3 not used explicitly below
-    # --- sampling; randomness over state dims, thresholds broadcast over time dims ---
     r  = rand(D...)
     Xt = copy(x0)
     x1bool      = w1 .> r
