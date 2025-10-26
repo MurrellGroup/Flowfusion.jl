@@ -125,14 +125,15 @@ function transition_mask_from_Xt(P::EditFlow, Xt::AbstractMatrix{<:Integer})
 end
 
 # Compute the remaining edits for the EditFlow as a Matrix
-function remaining_edits(P::EditFlow, Zt::Matrix{Int}, Z1::Matrix{Int}, dense=false)
+function remaining_edits(P::EditFlow, Zt::Matrix{Int}, Z1::Matrix{Int}, Xt::Matrix{Int}, dense=false)
     padding_token = P.padding_token
     latent_token = P.latent_token
     tokens = P.k
     (_, batch_size) = size(Z1)
 
-    filtered_cols = [filter(x -> x != latent_token, col) for col in eachcol(Zt)]
-    batch_length = maximum(length, filtered_cols) 
+    #filtered_cols = [filter(x -> x != latent_token, col) for col in eachcol(Zt)]
+    #batch_length = maximum(length, filtered_cols) 
+    batch_length = size(Xt, 1)
     pos = cumsum((Zt .!= padding_token) .& (Zt .!= latent_token), dims=1)
     
     #Insert 

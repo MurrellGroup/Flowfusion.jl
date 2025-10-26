@@ -124,7 +124,9 @@ function train_editflow!(P::FF.EditFlow,
             Z1 = vcat(fill(bos, 1, batch_size), Z1)
             
             transition_mask = FF.transition_mask_from_Xt(P, Xt)
-            edit_multiplier = FF.remaining_edits(P, Zt, Z1)
+            edit_multiplier = FF.remaining_edits(P, Zt, Z1, Xt)
+
+            @assert size(transition_mask) == size(edit_multiplier)
 
             den = 1f0 .- P.κ.(ts)
             den = max.(den, 1f-6)
@@ -171,7 +173,7 @@ P = FF.EditFlow(K; bos_token=0)
 model = EditFlowModel(; d=128, num_heads=8, nlayers=4, rff_dim=128, cond_dim=128, K=K)
 
 # Train; returned model is on CPU
-model = train_editflow!(P, model; epochs=2, steps_per_epoch=150, batch_size=256, lr=1f-3)
+model = train_editflow!(P, model; epochs=10, steps_per_epoch=150, batch_size=256, lr=1f-3)
 
 rng = Random.MersenneTwister(42)
 println("\n=== True PM samples (20) ===")
@@ -183,7 +185,7 @@ end
 
 samples = sample_gen_10_strings(P, model; ts=0f0:0.01f0:1f0)
 
-println("\n=== Model samples (10) ===")
+println("\n=== Model samples (20) ===")
 for (i, s) in enumerate(samples)
     if s isa AbstractString
         println("[", i, "] ", s)
