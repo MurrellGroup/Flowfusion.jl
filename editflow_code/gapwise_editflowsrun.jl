@@ -51,6 +51,26 @@ function make_minibatch(B::Int, P::FF.EditFlow; rng=Random.default_rng())
     return x0s, x1s, ts
 end
 
+
+############################
+# Gap-wise model + training
+############################
+
+# --- helper: build gap embeddings (pick one) ---
+gaps_from_sites_dup(H) = hcat(@view(H[:,1:1,:]), @view(H[:,2:end,:]), @view(H[:,end:end,:]))
+
+
+function gaps_from_sites_avg(H)
+    d, L, B = size(H)
+    if L == 1
+        middle = @view H[:, 1:0, :]
+    else
+        @views middle = 0.5f0 .* (H[:, 1:L-1, :] .+ H[:, 2:L, :])
+    end
+    # cat med dims=2 är säkrare på GPU än hcat i vissa kombinationer av views
+    return cat(@view(H[:, 1:1, :]), middle, @view(H[:, L:L, :]); dims=2) # d×(L+1)×B
+end
+
 struct EditFlowModel{L}
     layers::L
 end
@@ -60,11 +80,15 @@ function EditFlowModel(; d=128, num_heads=8, nlayers=6, rff_dim=128, cond_dim=12
     embedding   = Flux.Embedding(K + 2 => d)
     time_embed  = Flux.Chain(RandomFourierFeatures(1 => rff_dim, 1.0f0), Dense(rff_dim => cond_dim))
     blocks      = [Onion.AdaTransformerBlock(d, cond_dim, num_heads) for _ in 1:nlayers]
-    head_combined = Dense(d => 2K + 1, bias=false)
+    # --- split heads: ins on gaps, sub/del on sites ---
+    head_ins = Dense(d => K, bias=false)   # applied on gaps (L+1)
+    head_sub = Dense(d => K, bias=false)   # applied on sites (L)
+    head_del = Dense(d => 1, bias=false)   # applied on sites (L)
     rope        = RoPE(d ÷ num_heads, 4096)
-    return EditFlowModel((; embedding, time_embed, blocks, head_combined, rope, K))
+    return EditFlowModel((; embedding, time_embed, blocks, head_ins, head_sub, head_del, rope, K))
 end
 
+# Forward: returns M of shape (2K+1, L+1, B)
 function (model::EditFlowModel)(t, Xt_ms)
     m = model.layers
     X = FF.tensor(Xt_ms)
@@ -72,8 +96,8 @@ function (model::EditFlowModel)(t, Xt_ms)
     L, B = size(X)
 
     pmask = Zygote.@ignore FF.getlmask(Xt_ms)
-    Xp = X .+ 1
-    H = m.embedding(Xp)
+    Xp = X .+ 1                     # embedding is 1-indexed
+    H = m.embedding(Xp)             # d×L×B
 
     t = ndims(t) == 0 ? fill(Float32(t), B) : Float32.(t)
     cond = m.time_embed(reshape(t, 1, B))
@@ -83,56 +107,64 @@ function (model::EditFlowModel)(t, Xt_ms)
     rope  = Zygote.@ignore to_same_device(m.rope[1:L], H)
 
     for blk in m.blocks
-        H = blk(H; cond, rope, kpad_mask=pmask)
+        H = blk(H; cond, rope, kpad_mask=pmask)   # d×L×B
     end
-    return m.head_combined(H)
+
+    # --- gap embeddings & heads ---
+    Hg  = gaps_from_sites_avg(H)                  # d×(L+1)×B  (or use gaps_from_sites_dup)
+    ins = m.head_ins(Hg)                          # K×(L+1)×B
+    sub = m.head_sub(H)                           # K×L×B
+    del = m.head_del(H)                           # 1×L×B
+
+    # pad sub/del with a zero last column to reach L+1
+    @views sub_pad = cat(sub, sub[:, 1:1, :].*0; dims=2)
+    @views del_pad = cat(del, del[:, 1:1, :].*0; dims=2)
+
+    # final combined logits (untransformed): (2K+1)×(L+1)×B
+    return vcat(ins, sub_pad, del_pad)
 end
 
-# Training (GPU if available)
+# --- training loop (gap-wise) ---
 function train_editflow!(P::FF.EditFlow,
-                        model;
-                        epochs::Int=1,
-                        steps_per_epoch::Int=100,
-                        batch_size::Int=64,
-                        lr::Float32=1f-2,
-                        seed::Int=42,
-                        print_every::Int=25)
+                         model;
+                         epochs::Int=1,
+                         steps_per_epoch::Int=100,
+                         batch_size::Int=64,
+                         lr::Float32=1f-2,
+                         seed::Int=42,
+                         print_every::Int=25)
 
     rng = Random.MersenneTwister(seed)
     Random.seed!(seed)
 
-    # Move model to device (GPU if available)
+    # device
     model = Functors.fmap(to_dev, model)
     opt_state = Flux.setup(Flux.Adam(lr), model)
 
     for epoch in 1:epochs
         for step in 1:steps_per_epoch
-
-            # 1) Minibatch Sampling
+            # 1) minibatch
             x0s, x1s, ts = make_minibatch(batch_size, P; rng=rng)
-
-            # align_and_batch basically 
             Z0, Z1 = FF.align_and_batch(P, x0s, x1s)
-
-            #
             Zt, Xt = FF.interpolate_Z_elementwise(P, Z0, Z1, ts)
 
-            #Append BOS token to the beginning of the batch
+            # prepend BOS to all streams
             bos = P.bos_token
             Zt = vcat(fill(bos, 1, batch_size), Zt)
             Xt = vcat(fill(bos, 1, batch_size), Xt)
             Z1 = vcat(fill(bos, 1, batch_size), Z1)
-            
-            transition_mask = FF.transition_mask_from_Xt(P, Xt)
-            edit_multiplier = FF.remaining_edits(P, Zt, Z1, Xt)
 
+            # 2) gap-wise masks & multipliers
+            transition_mask = FF.transition_mask_from_Xt_gapwise(P, Xt)   # (2K+1, L+1, B)
+            edit_multiplier = FF.remaining_edits_gapwise(P, Zt, Z1, Xt)   # (2K+1, L+1, B)
             @assert size(transition_mask) == size(edit_multiplier)
+            @assert size(transition_mask, 2) == size(Xt, 1) + 1
 
-            den = 1f0 .- P.κ.(ts)
-            den = max.(den, 1f-6)
-            scheduler_scaling = P.dκ.(ts) ./ den
+            # scheduler
+            den = 1f0 .- P.κ.(ts); den = max.(den, 1f-2)
+            scheduler_scaling = P.dκ.(ts) ./ den  # length B
 
-            # 3) Masked state (CPU → device)
+            # 3) masked state → device
             lmask = Xt .!= P.padding_token
             cmask = trues(size(lmask))
             Xt_ms = FF.MaskedState(FF.DiscreteState(P.k, Xt), cmask, lmask)
@@ -143,25 +175,21 @@ function train_editflow!(P::FF.EditFlow,
             Emult_d = to_dev(edit_multiplier)
             sched_d = to_dev(reshape(Float32.(scheduler_scaling), 1, 1, :))
 
-            # 4) Forward + loss + update (on device)
+            # 4) fwd + loss + update
             loss, grad = Flux.withgradient(model) do m
-                M = m(ts_d, Xt_ms_d)
-                l = FF.edit_loss(P, M, Tmask_d, Emult_d, sched_d; eps=1f-8)
-                # INSERT_YOUR_CODE
-                if isnan(l)
-                    println("Maximum element of M: ", maximum(M))
-                end
-                l
+                M = m(ts_d, Xt_ms_d)   # (2K+1, L+1, B)
+                # shape sanity
+                @assert size(M) == size(Tmask_d) == size(Emult_d)
+                FF.edit_loss_gapwise(P, M, Tmask_d, Emult_d, sched_d; eps=1f-8)
             end
             Flux.update!(opt_state, model, grad[1])
 
             if step % print_every == 0
-                @info "train2" epoch step loss=Float32(loss)
+                @info "train-gapwise" epoch step loss=Float32(loss)
             end
         end
     end
 
-    # Move model back to CPU for sampling
     return Functors.fmap(to_cpu, model)
 end
 
@@ -176,24 +204,6 @@ model = EditFlowModel(; d=128, num_heads=8, nlayers=4, rff_dim=128, cond_dim=128
 # Train; returned model is on CPU
 model = train_editflow!(P, model; epochs=10, steps_per_epoch=150, batch_size=256, lr=1f-3)
 
-rng = Random.MersenneTwister(42)
-println("\n=== True PM samples (20) ===")
-for i in 1:20
-    seq = sample(PM; rng=rng)                 # Vector{Int} in 1..K_AA
-    aa_str = String(collect(AA20[seq]))
-    println("[", i, "] ", aa_str)
-end
 
-samples = sample_gen_10_strings(P, model; ts=0f0:0.01f0:1f0)
 
-println("\n=== Model samples (20) ===")
-for (i, s) in enumerate(samples)
-    if s isa AbstractString
-        println("[", i, "] ", s)
-    elseif s isa AbstractVector{<:AbstractString}
-        last_str = isempty(s) ? "" : s[end]
-        println("[", i, "] traj_last=", last_str, " (len=", length(s), ")")
-    else
-        println("[", i, "] (raw) ", s)
-    end
-end
+

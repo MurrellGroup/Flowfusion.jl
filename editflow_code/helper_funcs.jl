@@ -1,3 +1,6 @@
+using StringDistances, Statistics, ProgressMeter, Plots, StatsBase
+
+
 # Sampling helpers
 function state_to_PM_string(P::FF.EditFlow, st::FF.DiscreteState)
     xs = FF.tensor(st)
@@ -57,4 +60,105 @@ function to_aa_tokens(P::FF.EditFlow, st::FF.DiscreteState)
         end
     end
     return toks
+end
+
+function min_lev_to_set(queries::Vector{String}, refs::Vector{String}; normalize::Bool=true)
+    d = Levenshtein()
+    ref_lens = length.(refs)
+    out = Vector{Float64}(undef, length(queries))
+    @showprogress for (i, q) in enumerate(queries)
+        Lq = length(q)
+        best = typemax(Int); best_Lr = 1
+        for (r, Lr) in zip(refs, ref_lens)
+            lb = abs(Lq - Lr)
+            lb >= best && continue
+            dist = evaluate(d, q, r)
+            if dist < best
+                best = dist; best_Lr = Lr
+                best == 0 && break
+            end
+        end
+        out[i] = normalize ? best / max(Lq, best_Lr) : best
+    end
+    return out
+end
+
+function plot_lev_dist(name, val_seqs, gen_seqs, train_seqs; title="Novelty vs. training set", max_seqs=1000)
+    sample_if_large(seqs, n=max_seqs) = length(seqs) > n ? rand(seqs, n) : seqs
+
+    val_sample = sample_if_large(val_seqs)
+    gen_sample = sample_if_large(gen_seqs)
+    train_sample = sample_if_large(train_seqs)
+
+    val_lev = min_lev_to_set(val_sample, train_sample; normalize=true)
+    gen_lev = min_lev_to_set(gen_sample, train_sample; normalize=true)
+
+    # Robust bins even when all values are identical
+    minv = minimum([minimum(val_lev), minimum(gen_lev)])
+    maxv = maximum([maximum(val_lev), maximum(gen_lev)])
+    bins = (minv == maxv) ? range(0.0, 1.0, length=25) : range(minv, maxv, length=25)
+    p = histogram(val_lev; normalize=:probability, alpha=0.5, label="Natural", 
+                  bins=bins, xlabel="Min normalized Levenshtein", ylabel="Density", title=title)
+    histogram!(gen_lev; normalize=:probability, alpha=0.5, label="Generated", bins=bins)
+    
+    #println("val_lev: ", val_lev)
+    #println("gen_lev: ", gen_lev)
+
+    #path = joinpath(@__DIR__, "figures", "$(name).pdf")
+    #mkpath(dirname(path))
+    #savefig(p, path)
+    #savefig(p, "/figures/$(name).pdf")
+    return p
+end
+
+function AA_counts(seqs)
+    counts = countmap(Iterators.flatten(seqs))
+    labels = sort!(collect(keys(counts)))
+    return labels, counts
+end
+
+function plot_AA_dist(name, real_seqs, gen_seqs; title="Normalized AA frequencies")
+    # Always show the full alphabet and filter invalid chars
+    labels = collect(AA20)
+    alphabet = Set(labels)
+    r_counts = countmap(Iterators.flatten((ch for s in real_seqs for ch in s if ch in alphabet)))
+    g_counts = countmap(Iterators.flatten((ch for s in gen_seqs  for ch in s if ch in alphabet)))
+    r = Float64[get(r_counts, c, 0) for c in labels]
+    g = Float64[get(g_counts, c, 0) for c in labels]
+    rs = sum(r); r = rs > 0 ? r ./ rs : fill(0.0, length(r))
+    gs = sum(g); g = gs > 0 ? g ./ gs : fill(0.0, length(g))
+    # Grouped bars without unsupported bar_position
+    p = bar(string.(labels), [r g];
+            label=["Natural" "Generated"], xlabel="AA", ylabel="Proportion",
+            title=title, alpha=0.5)
+    return p
+end
+
+function len_dist(seqs; fig_name="len_dist.pdf", sort_labels=true)
+    isempty(seqs) && return (Int[], Float64[])
+    # Count only AA20 letters (ignore BOS '>' and any non-AA chars)
+    alphabet = Set(AA20)
+    lens = [count(ch -> ch in alphabet, s) for s in seqs]
+    cm   = countmap(lens)                 # how many seqs of each length
+    Ls   = collect(keys(cm))
+    sort_labels && sort!(Ls)
+    props = [cm[L] for L in Ls] ./ max(length(lens), 1)
+    return Ls, props
+end
+function plot_len_dist(name, real_seqs, gen_seqs; title="Sequence length distribution")
+    real_labels, real_props = len_dist(real_seqs)
+    gen_labels, gen_props   = len_dist(gen_seqs)
+
+    # Build unified x-axis and zero-fill missing bins
+    all_labels = sort!(union(real_labels, gen_labels))
+    rmap = Dict(real_labels .=> real_props)
+    gmap = Dict(gen_labels .=> gen_props)
+    r = [get(rmap, L, 0.0) for L in all_labels]
+    g = [get(gmap, L, 0.0) for L in all_labels]
+
+    p = bar(string.(all_labels), [r g];
+            label=["Natural" "Generated"], xlabel="Length", ylabel="Proportion",
+            title=title, alpha=0.5)
+    #savefig(p, "../img/unconditional/len_dist_$(name).pdf")
+    return p
 end
