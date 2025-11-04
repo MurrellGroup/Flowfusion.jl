@@ -28,7 +28,23 @@ function sample_gen_n(P::FF.EditFlow, model; n::Int=10, ts=0f0:0.01f0:1f0, rng=R
         bos = P.bos_token
         toks = collect(FF.tensor(x0s[1]))
         x0_bos = FF.DiscreteState(P.k, vcat([bos], toks))
-        gens[i] = FF.gen(P, x0_bos, model, ts)
+        res = FF.gen(P, x0_bos, model, ts)
+        # Strip BOS token(s) from outputs
+        strip_bos_state(st::FF.DiscreteState) = begin
+            xs = collect(FF.tensor(st))
+            if !isempty(xs) && xs[1] == bos
+                FF.DiscreteState(P.k, xs[2:end])
+            else
+                st
+            end
+        end
+        if res isa FF.DiscreteState
+            gens[i] = strip_bos_state(res)
+        elseif res isa AbstractVector{<:FF.DiscreteState}
+            gens[i] = strip_bos_state.(res)
+        else
+            gens[i] = res
+        end
     end
     return gens
 end
