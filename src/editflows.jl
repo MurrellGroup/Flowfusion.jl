@@ -20,7 +20,7 @@ _coerce_impl(x::AbstractString) = begin
     end
 end
 
-_resolve_impl(impl) = impl === nothing ? GAPWISE : _coerce_impl(impl)
+_resolve_impl(impl) = impl === nothing ? POSITIONWISE_REPARAM : _coerce_impl(impl)
 
 struct EditFlow <: DiscreteProcess
     k::Int                 # alphabet size (tokens 1..k)
@@ -41,7 +41,7 @@ const EDITFLOW_DISPATCH_STRINGS = (
 
 EditFlow(k; transform = NNlib.softplus,
             κ = identity,
-            dκ = t -> one(eltype(t)),
+            dκ = t -> one(t),
             padding_token::Int = k + 1,
             latent_token::Int = k + 2,
             bos_token::Int = 0,
@@ -195,8 +195,12 @@ end
 function transition_mask_from_Xt(P::EditFlow, Xt::AbstractMatrix{<:Integer})
     if P.impl == GAPWISE
         return transition_mask_from_Xt_gapwise(P, Xt)
-    else
+    elseif P.impl == POSITIONWISE
         return transition_mask_from_Xt_positionwise(P, Xt)
+    elseif P.impl == POSITIONWISE_REPARAM
+        return transition_mask_from_Xt_positionwise_reparam(P, Xt)
+    else
+        error("Unknown EditFlow implementation: $(P.impl)")
     end
 end
 
@@ -266,9 +270,11 @@ function transition_mask_from_Xt_gapwise(P::EditFlow, Xt::AbstractMatrix{<:Integ
     end
     return M
 end
+
 function transition_mask_from_Xt_positionwise_reparam(P::EditFlow, Xt::AbstractMatrix{<:Integer})
     tokens = P.k
     pad = P.padding_token
+    bos = P.bos_token
     xt_len, B = size(Xt)
     ins_q_mask = ones(Float32, tokens, xt_len, B)
     sub_q_mask = ones(Float32, tokens, xt_len, B)
@@ -277,7 +283,7 @@ function transition_mask_from_Xt_positionwise_reparam(P::EditFlow, Xt::AbstractM
     del_lambda_mask = ones(Float32, 1, xt_len, B)
     for b in 1:B
         x = Xt[:,b]
-        Lb = count(t -> t != PAD, x)
+        Lb = count(t -> t != pad, x)
         # Mask the padding
         ins_q_mask[:, (Lb+1):xt_len, b] .= 0
         sub_q_mask[:, (Lb+1):xt_len, b] .= 0
@@ -285,28 +291,40 @@ function transition_mask_from_Xt_positionwise_reparam(P::EditFlow, Xt::AbstractM
         sub_lambda_mask[:, (Lb+1):xt_len, b] .= 0
         del_lambda_mask[:, (Lb+1):xt_len, b] .= 0
         #Mask the BOS for sub and del
-        sub_q_mask[:, 1, b] .= 0
-        sub_lambda_mask[:, 1, b] .= 0
-        del_lambda_mask[:, 1, b] .= 0
+        # forbid sub/del at BOS iff BOS present at i=1
+        if Lb >= 1 && x[1] == bos
+            sub_q_mask[:,      1, b] .= 0
+            sub_lambda_mask[:, 1, b] .= 0
+            del_lambda_mask[:, 1, b] .= 0
+        end
+        # sub_q_mask[:, 1, b] .= 0
+        # sub_lambda_mask[:, 1, b] .= 0
+        # del_lambda_mask[:, 1, b] .= 0
         #Mask the self-substitutions 
         for i in 2:Lb
             t = x[i]
             if 1 <= t <= tokens
-                sub_q_mask[t, i, b] .= 0
+                sub_q_mask[t, i, b] = 0
             else
                 throw(ArgumentError("Invalid token: $t"))
             end
         end
-        return (ins_q_mask, sub_q_mask, ins_lambda_mask, sub_lambda_mask, del_lambda_mask)
+    end
+    return (ins_q_mask, sub_q_mask, ins_lambda_mask, sub_lambda_mask, del_lambda_mask)
 end
 
 function remaining_edits(P::EditFlow, Zt::Matrix{Int}, Z1::Matrix{Int}, Xt::Matrix{Int}, dense=false)
     if P.impl == GAPWISE
         return remaining_edits_gapwise(P, Zt, Z1, Xt)
-    else
+    elseif P.impl == POSITIONWISE
         return remaining_edits_positionwise(P, Zt, Z1, Xt)
+    elseif P.impl == POSITIONWISE_REPARAM
+        return remaining_edits_positionwise_reparam(P, Zt, Z1, Xt)
+    else
+        error("Unknown EditFlow implementation: $(P.impl)")
     end
 end
+
 # Compute the remaining edits for the EditFlow as a Matrix
 function remaining_edits_positionwise(P::EditFlow, Zt::Matrix{Int}, Z1::Matrix{Int}, Xt::Matrix{Int}, dense=false)
     padding_token = P.padding_token
@@ -337,6 +355,7 @@ function remaining_edits_positionwise(P::EditFlow, Zt::Matrix{Int}, Z1::Matrix{I
     b = Z1 .!= latent_token
     c = Z1 .!= Zt
     subs = Z1.*(a .& b .& c)
+
     sub_edits = zeros(Float32, (tokens, batch_length, batch_size))
     sub_indices = findall(!iszero, subs)
     sub_cols_to_update = pos[sub_indices]
@@ -348,7 +367,7 @@ function remaining_edits_positionwise(P::EditFlow, Zt::Matrix{Int}, Z1::Matrix{I
     dense_subs = (sub_rows_to_update .+ tokens, sub_cols_to_update, sub_samples_to_update)
 
     #Del
-    dels = Z1 .== latent_token
+    dels = (Z1 .== latent_token) .& (Zt .!= latent_token)
     del_edits = zeros(Float32, (1, batch_length, batch_size))
     del_indices = findall(!iszero, dels)
     del_cols_to_update = pos[del_indices]
@@ -452,7 +471,11 @@ function remaining_edits_positionwise_reparam(P::EditFlow, Zt::AbstractMatrix{<:
     dense_subs = (sub_rows_to_update .+ tokens, sub_cols_to_update, sub_samples_to_update)
 
     #Del
-    dels = Z1 .== latent_token
+    #tmp = Z1 .== latent_token
+    dels = (Z1 .== latent_token) .& (Zt .!= latent_token)
+    
+    #@assert tmp == dels "Assertion failed: tmp != dels"
+
     del_edits = zeros(Float32, (1, batch_length, batch_size))
     del_indices = findall(!iszero, dels)
     del_cols_to_update = pos[del_indices]
@@ -476,8 +499,12 @@ function step(P::EditFlow,
               s1::Real, s2::Real)
     if P.impl == GAPWISE
         return step_gapwise(P, hat, Xt, s1, s2)
-    else
+    elseif P.impl == POSITIONWISE
         return step_positionwise(P, Xt, hat, s1, s2)
+    elseif P.impl == POSITIONWISE_REPARAM
+        return step_positionwise_reparam(P, hat, Xt, s1, s2)
+    else
+        error("Unknown EditFlow implementation: $(P.impl)")
     end
 end
 
@@ -710,6 +737,241 @@ function rollout_gapwise(P::EditFlow, model, x0::DiscreteState, ts::AbstractVect
     return x
 end
 
+# --- helper: robust slice for (K,L,1)/(K,L) -> (K,L) and (1,L,1)/(1,L)/L -> Vector ---
+@inline _KL(A) = ndims(A) == 3 ? Array(@view A[:, :, 1]) :
+                 ndims(A) == 2 ? Array(A) :
+                 error("Expected (K,L,1) or (K,L), got size $(size(A))")
+
+@inline _L(A)  = ndims(A) == 3 ? vec(Array(@view A[1, :, 1])) :
+                 ndims(A) == 2 ? vec(Array(@view A[1, :]))    :
+                 ndims(A) == 1 ? vec(Array(A)) :
+                 error("Expected (1,L,1) or (1,L) or (L,), got size $(size(A))")
+
+"""
+One CTMC Euler step for POSITIONWISE_REPARAM.
+
+`hat` is a tuple (ins_q_logits, sub_q_logits, ins_lambda, sub_lambda, del_lambda)
+for the current sequence, with shapes (K,L,1)/(K,L) for logits and (1,L,1)/(1,L)/L for lambdas.
+Insertions are defined per *site* here: gap g=2..L+1 uses site g-1; gap 1 (pre-BOS) is blocked.
+"""
+function step_positionwise_reparam(
+    P::EditFlow,
+    hat,                                   # (ins_q_logits, sub_q_logits, ins_λ, sub_λ, del_λ)
+    Xt::DiscreteState{<:AbstractVector{<:Signed}},
+    t1::Real, t2::Real;
+    rng::AbstractRNG = Random.default_rng(),
+)
+    @assert t2 > t1
+    dt = Float64(t2 - t1)
+
+    # unpack + shapes -> arrays on CPU (OK for sampling)
+    ins_q_logits, sub_q_logits, ins_λ_raw, sub_λ_raw, del_λ_raw = hat
+    ins_q = NNlib.softmax(_KL(ins_q_logits); dims=1)       # (K,L)
+    sub_q = NNlib.softmax(_KL(sub_q_logits); dims=1)       # (K,L)
+    ins_λ  = P.transform(_L(ins_λ_raw))                    # (L,)
+    sub_λ  = P.transform(_L(sub_λ_raw))                    # (L,)
+    del_λ  = P.transform(_L(del_λ_raw))                    # (L,)
+
+    x = collect(tensor(Xt))                                # Vector{Int}
+    K = P.k
+    L = length(x)
+
+    # guard: empty sequence quick path
+    if L == 0
+        # Only allow a single "after last" insertion; reuse last-site rule -> none here; return as-is
+        return Xt
+    end
+
+    # --- forbid BOS edits and pre-BOS insert policy ---
+    if x[1] == P.bos_token
+        sub_q[:, 1] .= 0
+        sub_λ[1] = 0
+        del_λ[1] = 0
+    end
+
+    # --- forbid self-substitutions (zero prob, no renorm needed) ---
+    @inbounds for i in 1:L
+        tok = x[i]
+        if 1 <= tok <= K
+            sub_q[tok, i] = 0
+        else
+            # Non-vocab token at site i → block substitutions at this site
+            sub_q[:, i] .= 0
+            sub_λ[i] = 0
+        end
+    end
+
+    # -------- site events (delete or substitute) --------
+    to_delete = falses(L)
+    sub_to    = zeros(Int, L)
+    @inbounds for i in 1:L
+        r_del = max(del_λ[i], 0.0)
+        r_sub_total = max(sub_λ[i], 0.0) * sum(@view sub_q[:, i])
+        r_tot = r_del + r_sub_total
+        if r_tot > 0 && rand(rng) < (1 - exp(-dt * r_tot))
+            u = rand(rng) * r_tot
+            if u < r_del
+                to_delete[i] = true
+            elseif r_sub_total > 0
+                # sample token ∝ sub_q[:, i]
+                cs = cumsum(@view sub_q[:, i])
+                sub_to[i] = _pick_index1d!(rng, cs)
+            end
+        end
+    end
+
+    # -------- gap insertions (≤1 per gap) --------
+    # gap g in 1..L+1; g==1 (pre-BOS) is blocked; use site (g-1) rates otherwise,
+    # and for g==L+1 reuse site L.
+    ins_tok = fill(0, L + 1)
+    @inbounds for g in 2:(L+1)
+        src = min(g - 1, L)  # site index providing insertion rates for this gap
+        r_vec = (@view ins_q[:, src]) .* ins_λ[src]
+        r_tot = sum(r_vec)
+        if r_tot > 0 && rand(rng) < (1 - exp(-dt * r_tot))
+            cs = cumsum(r_vec)
+            ins_tok[g] = _pick_index1d!(rng, cs)
+        end
+    end
+    # explicitly block pre-BOS insert
+    ins_tok[1] = 0
+
+    # -------- build new sequence --------
+    result = Int[]
+    if ins_tok[1] != 0; push!(result, ins_tok[1]); end
+    @inbounds for i in 1:L
+        if !to_delete[i]
+            a = (sub_to[i] == 0) ? x[i] : sub_to[i]
+            push!(result, a)
+        end
+        if ins_tok[i + 1] != 0
+            push!(result, ins_tok[i + 1])
+        end
+    end
+
+    return DiscreteState(Xt.K, result)
+end
+
+
+#=
+@inline _KL(A) = ndims(A) == 3 ? Array(@view A[:, :, 1]) :
+                 ndims(A) == 2 ? Array(A) :
+                 error("Expected (K,L,1) or (K,L), got size $(size(A))")
+
+@inline _L(A)  = ndims(A) == 3 ? vec(Array(@view A[1, :, 1])) :
+                 ndims(A) == 2 ? vec(Array(@view A[1, :]))    :
+                 ndims(A) == 1 ? vec(Array(A)) :
+                 error("Expected (1,L,1) or (1,L) or (L,), got size $(size(A))")
+
+function step_positionwise_reparam(
+    P::EditFlow,
+    hat,                                   # (ins_q_logits, sub_q_logits, ins_λ, sub_λ, del_λ)
+    Xt::DiscreteState{<:AbstractVector{<:Signed}},
+    t1::Real, t2::Real;
+    rng::AbstractRNG = Random.default_rng(),
+)
+    @assert t2 > t1
+    dt = Float64(t2 - t1)
+
+    # unpack → arrays
+    ins_q_logits, sub_q_logits, ins_λ_raw, sub_λ_raw, del_λ_raw = hat
+    ins_q = NNlib.softmax(_KL(ins_q_logits); dims=1)       # (K,L)
+    sub_q = NNlib.softmax(_KL(sub_q_logits); dims=1)       # (K,L)
+    ins_λ  = P.transform(_L(ins_λ_raw))                    # (L,)
+    sub_λ  = P.transform(_L(sub_λ_raw))                    # (L,)
+    del_λ  = P.transform(_L(del_λ_raw))                    # (L,)
+
+    x = collect(tensor(Xt))
+    K = P.k
+    L = length(x)
+    if L == 0
+        return Xt
+    end
+
+    # --- κ-scaling to encourage growth over time ---
+    κt = clamp(float(P.κ(t2)), 0.0, 1.0)
+    ins_λ .*= κt
+    del_λ .*= (1 - κt)
+    # (sub_λ unchanged; keep neutral)
+
+    # --- BOS policy + small insert floor at first site (gap 2) ---
+    if x[1] == P.bos_token
+        sub_q[:, 1] .= 0
+        sub_λ[1] = 0
+        del_λ[1] = 0
+        λmin = eltype(ins_λ)(1e-3)
+        ins_λ[1] = max(ins_λ[1], λmin)
+    end
+
+    # --- forbid self-substitutions / non-vocab guards ---
+    @inbounds for i in 1:L
+        tok = x[i]
+        if 1 <= tok <= K
+            sub_q[tok, i] = 0
+        else
+            sub_q[:, i] .= 0
+            sub_λ[i] = 0
+        end
+    end
+
+    # -------- site events (delete or substitute) --------
+    to_delete = falses(L)
+    sub_to    = zeros(Int, L)
+    @inbounds for i in 1:L
+        r_del = max(del_λ[i], 0.0)
+        r_sub_total = max(sub_λ[i], 0.0) * sum(@view sub_q[:, i])
+        r_tot = r_del + r_sub_total
+        if r_tot > 0 && rand(rng) < (1 - exp(-dt * r_tot))
+            u = rand(rng) * r_tot
+            if u < r_del
+                to_delete[i] = true
+            elseif r_sub_total > 0
+                cs = cumsum(@view sub_q[:, i])
+                sub_to[i] = _pick_index1d!(rng, cs)
+            end
+        end
+    end
+
+    # -------- gap insertions (≤1 per gap) --------
+    # gap g=1..L+1 ; g==1 (pre-BOS) blocked; use site (g-1), with L reused for g==L+1
+    ins_tok = fill(0, L + 1)
+    @inbounds for g in 2:(L+1)
+        src = min(g - 1, L)
+        r_vec = (@view ins_q[:, src]) .* ins_λ[src]
+        r_tot = sum(r_vec)
+        if r_tot > 0 && rand(rng) < (1 - exp(-dt * r_tot))
+            cs = cumsum(r_vec)
+            ins_tok[g] = _pick_index1d!(rng, cs)
+        end
+    end
+    ins_tok[1] = 0  # block pre-BOS insert
+
+    # -------- build new sequence --------
+    result = Int[]
+    if ins_tok[1] != 0; push!(result, ins_tok[1]); end
+    @inbounds for i in 1:L
+        if !to_delete[i]
+            a = (sub_to[i] == 0) ? x[i] : sub_to[i]
+            push!(result, a)
+        end
+        if ins_tok[i + 1] != 0
+            push!(result, ins_tok[i + 1])
+        end
+    end
+
+    # -------- BOS-only guard (rare fallback) --------
+    if length(result) == 1 && result[1] == P.bos_token
+        r_vec = (@view ins_q[:, 1]) .* ins_λ[1]           # use first site’s insertion rates
+        if sum(r_vec) > 0
+            cs = cumsum(r_vec)
+            push!(result, _pick_index1d!(rng, cs))
+        end
+    end
+
+    return DiscreteState(Xt.K, result)
+end
+
+=#
 
 
 #=
@@ -736,7 +998,7 @@ function edit_loss(P::EditFlow, M, transition_mask, edit_multiplier, scheduler_s
     elseif P.impl == POSITIONWISE
         return edit_loss_positionwise(P, M, transition_mask, edit_multiplier, scheduler_scaling; op_mask=op_mask, eps=eps)
     elseif P.impl == POSITIONWISE_REPARAM
-        return edit_loss_positionwise_reparam(P, M, transition_mask, edit_multiplier, scheduler_scaling; op_mask=op_mask, eps=eps)  
+        return edit_loss_positionwise_reparam(P, M, transition_mask, edit_multiplier, scheduler_scaling; eps=eps)  
     end
 end
 
@@ -803,26 +1065,91 @@ function edit_loss_gapwise(P::EditFlow,
     return mean(loss_per_batch)
 end
 
+
+#=
 function edit_loss_positionwise_reparam(P::EditFlow,
     M, transition_mask, edit_multiplier, scheduler_scaling; eps=1e-8)
     (ins_q_mask, sub_q_mask, ins_lambda_mask, sub_lambda_mask, del_lambda_mask) = transition_mask
     (ins_q, sub_q, ins_lambda, sub_lambda, del_lambda) = M
-    ins_q = softmax(ins_q, dims=1)
-    sub_q = softmax(sub_q, dims=1)
-    ins_lambda = P.transform(ins_q)
-    sub_lambda = P.transform(sub_q)
-    del_lambda = P.transform(del_lambda)
-    loss_term_1 = sum(ins_lambda.* ins_lambda_mask + sub_lambda.* sub_lambda_mask + del_lambda.* del_lambda_mask)
+    # pre-softmax mask (safe -Inf with Float32 works; on some accelerators prefer -1e9f0)
+    #ins_q = NNlib.softmax(ins_q_logits .+ ifelse.(ins_q_mask .> 0, 0f0, negInf), dims=1)
+    #sub_q = NNlib.softmax(sub_q_logits .+ ifelse.(sub_q_mask .> 0, 0f0, negInf), dims=1)
+    # ins_q = NNlib.softmax(ins_q, dims=1)
+    # sub_q = NNlib.softmax(sub_q, dims=1)
+
+    # probs
+    ins_q = NNlib.softmax(ins_q; dims=1);  ins_q .*= ins_q_mask
+    sub_q = NNlib.softmax(sub_q; dims=1);  sub_q .*= sub_q_mask
+
+    ins_lambda = P.transform(ins_lambda); ndims(ins_lambda)==2 && (ins_lambda = reshape(ins_lambda, 1, size(ins_lambda,1), size(ins_lambda,2)))
+    sub_lambda = P.transform(sub_lambda); ndims(sub_lambda)==2 && (sub_lambda = reshape(sub_lambda, 1, size(sub_lambda,1), size(sub_lambda,2)))
+    del_lambda = P.transform(del_lambda); ndims(del_lambda)==2 && (del_lambda = reshape(del_lambda, 1, size(del_lambda,1), size(del_lambda,2)))
+
+    # regularizer (sum of *allowed* mass)
+    sum_ins_q = sum(ins_q; dims=1)
+    sum_sub_q = sum(sub_q; dims=1)
+    loss_term_1 = sum(ins_lambda .* ins_lambda_mask .* sum_ins_q .+
+                sub_lambda .* sub_lambda_mask .* sum_sub_q .+
+                del_lambda .* del_lambda_mask; dims=(1,2))
+
+
+    #loss_term_1 = sum(ins_lambda.* ins_lambda_mask + sub_lambda.* sub_lambda_mask + del_lambda.* del_lambda_mask, dims=(1,2))
     scl = reshape(scheduler_scaling, 1, 1, :) # (1,1,B)
-    
-    #hmm fix shape of lambdas they might be vectors...
-    ins_rate_log = log.(max.(ins_lambda.* ins_q, eltype(ins_lambda)(eps)))
-    sub_rate_log = log.(max.(sub_lambda .* sub_q, eltype(R)(eps)))
-    del_rate_log = log.(max.(del_lambda, eltype(R)(eps)))
+
+    # ins_lambda = reshape(ins_lambda, 1, size(ins_lambda)...)
+    # sub_lambda = reshape(sub_lambda, 1, size(sub_lambda)...)
+    # del_lambda = reshape(del_lambda, 1, size(del_lambda)...)
+
+    ins_rate_log = log.(max.(ins_lambda .* ins_q, eltype(ins_lambda)(eps)))
+    sub_rate_log = log.(max.(sub_lambda .* sub_q, eltype(sub_lambda)(eps)))
+    del_rate_log = log.(max.(del_lambda, eltype(del_lambda)(eps)))
 
     (ins_q_edits, sub_q_edits, del_lambda_edits) = edit_multiplier
-    loss_term_2 = sum( (ins_q_edits .* ins_q_log) + () )
+    loss_term_2 = sum(scl .* (ins_q_edits .* ins_rate_log), dims=(1,2)) 
+                + sum(scl .* (sub_q_edits .* sub_rate_log), dims=(1,2)) 
+                + sum(scl .* (del_lambda_edits .* del_rate_log), dims=(1,2))
+    return mean(loss_term_1 .- loss_term_2)
 end
+=#
+
+function edit_loss_positionwise_reparam(P::EditFlow,
+    M, transition_mask, edit_multiplier, scheduler_scaling; eps=1e-8)
+
+    (ins_q_mask, sub_q_mask, ins_lambda_mask, sub_lambda_mask, del_lambda_mask) = transition_mask
+    (ins_q_logits, sub_q_logits, ins_lambda, sub_lambda, del_lambda) = M
+
+    # q: post-softmax + mask (K,L,B)
+    ins_q = NNlib.softmax(ins_q_logits; dims=1) .* ins_q_mask
+    sub_q = NNlib.softmax(sub_q_logits; dims=1) .* sub_q_mask
+
+    # λ: transform -> (1,L,B)
+    ins_lambda = P.transform(ins_lambda); ndims(ins_lambda)==2 && (ins_lambda = reshape(ins_lambda, 1, size(ins_lambda,1), size(ins_lambda,2)))
+    sub_lambda = P.transform(sub_lambda); ndims(sub_lambda)==2 && (sub_lambda = reshape(sub_lambda, 1, size(sub_lambda,1), size(sub_lambda,2)))
+    del_lambda = P.transform(del_lambda); ndims(del_lambda)==2 && (del_lambda = reshape(del_lambda, 1, size(del_lambda,1), size(del_lambda,2)))
+
+    # term 1: sum of allowed exit rates (1,B)
+    sum_ins_q   = sum(ins_q; dims=1)  # (1,L,B)
+    sum_sub_q   = sum(sub_q; dims=1)  # (1,L,B)
+    loss_term_1 = sum(ins_lambda .* ins_lambda_mask .* sum_ins_q .+
+                      sub_lambda .* sub_lambda_mask .* sum_sub_q .+
+                      del_lambda .* del_lambda_mask; dims=(1,2))
+
+
+
+    # term 2: data term (1,B)
+    scl = reshape(scheduler_scaling, 1, 1, :)
+    (ins_q_edits, sub_q_edits, del_lambda_edits) = edit_multiplier
+    ins_rate_log = log.(max.(ins_lambda .* ins_q, eltype(ins_lambda)(eps)))
+    sub_rate_log = log.(max.(sub_lambda .* sub_q, eltype(sub_lambda)(eps)))
+    del_rate_log = log.(max.(del_lambda,            eltype(del_lambda)(eps)))
+
+    loss_term_2 = sum(scl .* (ins_q_edits      .* ins_rate_log); dims=(1,2)) +
+                  sum(scl .* (sub_q_edits      .* sub_rate_log); dims=(1,2)) +
+                  sum(scl .* (del_lambda_edits .* del_rate_log); dims=(1,2))
+
+    return mean(loss_term_1 .- loss_term_2)
+end
+
 """
 getlmask(P::EditFlow, Xt::AbstractMatrix{<:Integer})
 
@@ -832,4 +1159,3 @@ function getlmask(P::EditFlow, Xt::AbstractMatrix{<:Integer})
     padding_token = P.padding_token
     return Xt .!= padding_token
 end
-

@@ -197,7 +197,7 @@ end
 K = PM.K
 println("K: ", K)
 
-P = FF.EditFlow(K; bos_token=0)
+P = FF.EditFlow(K; bos_token=0, impl="positionwise_reparam")
 
 model = EditFlowModel(; d=128, num_heads=8, nlayers=4, rff_dim=128, cond_dim=128, K=K)
 
