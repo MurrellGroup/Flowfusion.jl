@@ -188,3 +188,41 @@ function x1_to_v(x_t::AbstractArray{T}, x1::AbstractArray{T}, t; eps::T=T(1e-5))
     t_exp = expand(t, ndims(x_t))
     return (x1 .- x_t) ./ (one(T) .- t_exp .+ eps)
 end
+
+# ============================================================================
+# Step function for gen() integration
+# ============================================================================
+
+"""
+    step(P::RDNFlow, Xₜ::ContinuousState, X̂₁::ContinuousState, s₁, s₂)
+
+Single Euler step for flow matching. Moves from time s₁ to s₂.
+X̂₁ is the predicted endpoint (X1 prediction from the model).
+
+Uses: v = (X̂₁ - Xₜ) / (1 - t), then Xₜ_new = Xₜ + v * dt
+"""
+function step(P::RDNFlow, Xₜ::ContinuousState, X̂₁::ContinuousState, s₁, s₂)
+    T = eltype(tensor(Xₜ))
+    dt = T(s₂) - T(s₁)
+    t = T(s₁)
+
+    # Velocity: v = (x1 - xt) / (1 - t)
+    xt = tensor(Xₜ)
+    x1 = tensor(X̂₁)
+    v = x1_to_v(xt, x1, t)
+
+    # Euler step: x_new = x_t + v * dt
+    x_new = xt .+ v .* dt
+
+    # Enforce zero center of mass if needed
+    if P.zero_com
+        x_new = _force_zero_com(x_new, nothing)
+    end
+
+    return ContinuousState(x_new)
+end
+
+# Handle raw tensor predictions (resolveprediction converts these to ContinuousState)
+function step(P::RDNFlow, Xₜ::ContinuousState, X̂₁::AbstractArray, s₁, s₂)
+    step(P, Xₜ, ContinuousState(X̂₁), s₁, s₂)
+end
