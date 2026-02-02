@@ -45,6 +45,7 @@ export
     rdn_sde_step,
     v_to_x1,
     x1_to_v,
+    vf_to_score,
     MaskedState,
     Guide,
     tangent_guide,
