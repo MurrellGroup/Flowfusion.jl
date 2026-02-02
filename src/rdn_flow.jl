@@ -2,7 +2,9 @@
 # For protein coordinates and latent spaces
 
 using ForwardBackward
-using Statistics: mean
+
+# Simple mean implementation (avoid Statistics dependency)
+_mean(x; dims) = sum(x; dims=dims) ./ size(x, dims...)
 
 """
     RDNFlow(dim::Int; zero_com::Bool=false, sde_gt_mode::Symbol=:const, sde_gt_param::Real=0.0)
@@ -76,7 +78,7 @@ Force zero center of mass along the sequence dimension (dim 2).
 function _force_zero_com(x::AbstractArray{T}, mask=nothing) where T
     if isnothing(mask)
         # Simple mean subtraction along dim 2
-        com = mean(x; dims=2)
+        com = _mean(x; dims=2)
         return x .- com
     else
         # Masked mean
