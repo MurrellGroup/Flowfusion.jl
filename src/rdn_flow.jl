@@ -7,7 +7,8 @@ using ForwardBackward
 _mean(x; dims) = sum(x; dims=dims) ./ size(x, dims...)
 
 """
-    RDNFlow(dim::Int; zero_com::Bool=false, sde_gt_mode::Symbol=:const, sde_gt_param::Real=0.0)
+    RDNFlow(dim::Int; zero_com::Bool=false, sde_gt_mode::Symbol=:const, sde_gt_param::Real=1.0,
+            sc_scale_noise::Real=0.0, sc_scale_score::Real=1.0, t_lim_ode::Real=1.0)
 
 Flow matching process on (R^d)^n where n is the number of elements (e.g., residues)
 and d is the dimensionality per element.
@@ -17,16 +18,21 @@ Uses linear interpolation for bridging: x_t = (1-t)*x_0 + t*x_1
 # Arguments
 - `dim`: Dimensionality d (e.g., 3 for CA coordinates, 8 for latents)
 - `zero_com`: Whether to enforce zero center of mass (typically true for coordinates)
-- `sde_gt_mode`: Mode for g(t) noise schedule in SDE inference (:const, :tan, :linear)
-- `sde_gt_param`: Parameter for g(t) schedule
+- `sde_gt_mode`: Mode for g(t) noise schedule (:const, :tan, Symbol("1/t"), Symbol("1-t/t"))
+- `sde_gt_param`: Base parameter for g(t) schedule (default 1.0)
+- `sc_scale_noise`: Noise scaling factor (0 = ODE, >0 = SDE). Default 0.0
+- `sc_scale_score`: Score scaling factor (default 1.0)
+- `t_lim_ode`: Switch to pure ODE above this time (default 1.0 = never switch)
 
 # Example
 ```julia
-# For CA coordinates (3D, zero COM)
-P_ca = RDNFlow(3; zero_com=true)
+# For CA coordinates (3D, zero COM) - la-proteina defaults
+P_ca = RDNFlow(3; zero_com=true, sde_gt_mode=Symbol("1/t"), sde_gt_param=1.0,
+               sc_scale_noise=0.1, sc_scale_score=1.0, t_lim_ode=0.98)
 
-# For local latents (8D, no zero COM)
-P_latent = RDNFlow(8; zero_com=false)
+# For local latents (8D, no zero COM) - la-proteina defaults
+P_latent = RDNFlow(8; zero_com=false, sde_gt_mode=:tan, sde_gt_param=1.0,
+                   sc_scale_noise=0.1, sc_scale_score=1.0, t_lim_ode=0.98)
 
 # Combined product space (use tuple)
 P = (P_ca, P_latent)
@@ -37,10 +43,17 @@ struct RDNFlow{T<:Real} <: Process
     zero_com::Bool
     sde_gt_mode::Symbol
     sde_gt_param::T
+    sc_scale_noise::T
+    sc_scale_score::T
+    t_lim_ode::T
 end
 
-RDNFlow(dim::Int; zero_com::Bool=false, sde_gt_mode::Symbol=:const, sde_gt_param::Real=0.0f0) =
-    RDNFlow(dim, zero_com, sde_gt_mode, Float32(sde_gt_param))
+function RDNFlow(dim::Int; zero_com::Bool=false, sde_gt_mode::Symbol=:const,
+                 sde_gt_param::Real=1.0f0, sc_scale_noise::Real=0.0f0,
+                 sc_scale_score::Real=1.0f0, t_lim_ode::Real=1.0f0)
+    RDNFlow(dim, zero_com, sde_gt_mode, Float32(sde_gt_param),
+            Float32(sc_scale_noise), Float32(sc_scale_score), Float32(t_lim_ode))
+end
 
 """
     sample_rdn_noise(P::RDNFlow, shape...; T=Float32, mask=nothing)
@@ -157,35 +170,43 @@ function rdn_sde_step(P::RDNFlow, x_t::AbstractArray{T}, v::AbstractArray{T}, t:
 end
 
 """
-    _compute_gt(P::RDNFlow, t)
+    _compute_gt(P::RDNFlow, t; clamp_val=1e5, eps=1e-2)
 
 Compute g(t) noise schedule value at time t.
 
 Supported modes:
 - `:const` - constant: g(t) = param
-- `:tan` - tangent schedule: g(t) = param * tan(π/2 * (1-t))
+- `:tan` - tangent schedule: g(t) = (π/2) * sin((1-t)*π/2) / (cos((1-t)*π/2) + eps)
 - `:linear` - linear: g(t) = param * t
-- `Symbol("1-t/t")` - ratio: g(t) = param * (1-t) / t
-- `Symbol("1/t")` - inverse: g(t) = param / t
-"""
-function _compute_gt(P::RDNFlow, t::T) where T
-    eps = T(1e-5)
-    t_clamped = clamp(t, T(0), T(1) - eps)
+- `Symbol("1-t/t")` - ratio: g(t) = (1-t) / (t + eps)
+- `Symbol("1/t")` - inverse: g(t) = 1 / (t + eps)
 
-    if P.sde_gt_mode == :const
-        return T(P.sde_gt_param)
+Note: sde_gt_param is used for :const and :linear modes only.
+For other modes, it's typically 1.0 (no scaling).
+
+Returns clamped to [0, clamp_val] to prevent numerical issues.
+"""
+function _compute_gt(P::RDNFlow, t::T; clamp_val::T=T(1e5), eps::T=T(1e-2)) where T
+    t_clamped = clamp(t, T(0), T(1) - T(1e-5))
+
+    gt = if P.sde_gt_mode == :const
+        T(P.sde_gt_param)
     elseif P.sde_gt_mode == :tan
-        # Tangent schedule: high noise early, low noise late
-        return T(P.sde_gt_param) * tan(T(π/2) * (one(T) - t_clamped))
+        # Tangent schedule matching Python: (π/2) * sin((1-t)*π/2) / (cos((1-t)*π/2) + eps)
+        num = sin((one(T) - t_clamped) * T(π/2))
+        den = cos((one(T) - t_clamped) * T(π/2))
+        T(π/2) * num / (den + eps)
     elseif P.sde_gt_mode == :linear
-        return T(P.sde_gt_param) * t_clamped
+        T(P.sde_gt_param) * t_clamped
     elseif P.sde_gt_mode == Symbol("1-t/t")
-        return T(P.sde_gt_param) * (one(T) - t_clamped) / (t_clamped + eps)
+        (one(T) - t_clamped) / (t_clamped + eps)
     elseif P.sde_gt_mode == Symbol("1/t")
-        return T(P.sde_gt_param) / (t_clamped + eps)
+        one(T) / (t_clamped + eps)
     else
-        return T(0)
+        T(0)
     end
+
+    return clamp(gt, T(0), clamp_val)
 end
 
 # Velocity to X1 prediction and vice versa
@@ -233,13 +254,14 @@ end
 Single step for flow matching. Moves from time s₁ to s₂.
 X̂₁ is the predicted endpoint (X1 prediction from the model).
 
-If P.sde_gt_param > 0, uses SDE sampling:
-    dx = [v + g(t) * score] dt + sqrt(2 * g(t)) dW
+If P.sc_scale_noise > 0 and t < P.t_lim_ode, uses SDE sampling:
+    dx = [v + g(t) * sc_scale_score * score] dt + sqrt(2 * g(t) * sc_scale_noise) dW
 
 Otherwise uses deterministic ODE:
     dx = v * dt
 
 The noise schedule g(t) is controlled by P.sde_gt_mode and P.sde_gt_param.
+Switches to pure ODE when t >= P.t_lim_ode.
 """
 function step(P::RDNFlow, Xₜ::ContinuousState, X̂₁::ContinuousState, s₁, s₂)
     T = eltype(tensor(Xₜ))
@@ -252,22 +274,28 @@ function step(P::RDNFlow, Xₜ::ContinuousState, X̂₁::ContinuousState, s₁, 
     # Velocity: v = (x1 - xt) / (1 - t)
     v = x1_to_v(xt, x1, t)
 
-    # Compute g(t) for potential SDE noise
-    gt = _compute_gt(P, t)
+    # Check if we should use SDE or ODE
+    use_sde = P.sc_scale_noise > T(1e-8) && t < P.t_lim_ode
 
-    if gt > T(1e-8)
-        # SDE step: dx = [v + g(t) * score] dt + sqrt(2 * g(t)) dW
+    if use_sde
+        # Compute g(t) for SDE noise
+        gt = _compute_gt(P, t)
+
+        # SDE step: dx = [v + g(t) * sc_scale_score * score] dt + sqrt(2 * g(t) * sc_scale_noise) dW
         score = vf_to_score(xt, v, t)
 
-        # Deterministic drift
-        drift = v .+ gt .* score
+        # Deterministic drift with scaled score
+        drift = v .+ gt .* T(P.sc_scale_score) .* score
 
-        # Stochastic noise
+        # Stochastic noise with scaled diffusion
         noise = randn(T, size(xt))
         if P.zero_com
             noise = _force_zero_com(noise, nothing)
         end
-        diffusion = sqrt(T(2) * gt * dt) .* noise
+        # Ensure diffusion coefficient is non-negative
+        diffusion_var = max(T(0), T(2) * gt * T(P.sc_scale_noise) * abs(dt))
+        diffusion_coef = sqrt(diffusion_var)
+        diffusion = diffusion_coef .* noise
 
         x_new = xt .+ drift .* dt .+ diffusion
     else
