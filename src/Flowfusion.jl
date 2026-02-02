@@ -32,6 +32,7 @@ include("batching.jl")
 
 include("indel.jl")
 include("dist_dfm.jl")
+include("rdn_flow.jl")
 
 export
     #Processes not in ForwardBackward.jl
@@ -39,6 +40,11 @@ export
     NoisyInterpolatingDiscreteFlow,
     DoobMatchingFlow,
     OUFlow,
+    RDNFlow,
+    sample_rdn_noise,
+    rdn_sde_step,
+    v_to_x1,
+    x1_to_v,
     MaskedState,
     Guide,
     tangent_guide,
