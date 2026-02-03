@@ -42,6 +42,8 @@ export
     OUFlow,
     RDNFlow,
     sample_rdn_noise,
+    schedule_transform,
+    rdn_bridge,
     rdn_sde_step,
     v_to_x1,
     x1_to_v,

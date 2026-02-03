@@ -42,6 +42,8 @@ using ForwardBackward
         end
     end
 
+    include("test_rdn_schedule.jl")
+
     @testset "Bridge, step" begin
 
         siz = (5,6)

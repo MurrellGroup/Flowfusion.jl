@@ -7,31 +7,42 @@ using ForwardBackward
 _mean(x; dims) = sum(x; dims=dims) ./ size(x, dims...)
 
 """
-    RDNFlow(dim::Int; zero_com::Bool=false, sde_gt_mode::Symbol=:const, sde_gt_param::Real=1.0,
+    RDNFlow(dim::Int; zero_com::Bool=false, schedule::Symbol=:linear, schedule_param::Real=1.0,
+            sde_gt_mode::Symbol=:const, sde_gt_param::Real=1.0,
             sc_scale_noise::Real=0.0, sc_scale_score::Real=1.0, t_lim_ode::Real=1.0)
 
 Flow matching process on (R^d)^n where n is the number of elements (e.g., residues)
 and d is the dimensionality per element.
 
-Uses linear interpolation for bridging: x_t = (1-t)*x_0 + t*x_1
+Uses scheduled interpolation for bridging: x_t = (1-τ(u))*x_0 + τ(u)*x_1
+where τ(u) is the schedule transform applied to uniform progress u.
 
 # Arguments
 - `dim`: Dimensionality d (e.g., 3 for CA coordinates, 8 for latents)
 - `zero_com`: Whether to enforce zero center of mass (typically true for coordinates)
+- `schedule`: Time schedule mode (:linear, :power, :log). Default :linear
+- `schedule_param`: Parameter for schedule (p for power/log). Default 1.0
 - `sde_gt_mode`: Mode for g(t) noise schedule (:const, :tan, Symbol("1/t"), Symbol("1-t/t"))
 - `sde_gt_param`: Base parameter for g(t) schedule (default 1.0)
 - `sc_scale_noise`: Noise scaling factor (0 = ODE, >0 = SDE). Default 0.0
 - `sc_scale_score`: Score scaling factor (default 1.0)
 - `t_lim_ode`: Switch to pure ODE above this time (default 1.0 = never switch)
 
+# Schedule modes
+- `:linear` - τ(u) = u (standard linear interpolation)
+- `:power` - τ(u) = u^p (slow to reach high t, used for latents)
+- `:log` - τ(u) = (1 - 10^(-p*u)) / (1 - 10^(-p)) (fast to reach high t, used for CA)
+
 # Example
 ```julia
-# For CA coordinates (3D, zero COM) - la-proteina defaults
-P_ca = RDNFlow(3; zero_com=true, sde_gt_mode=Symbol("1/t"), sde_gt_param=1.0,
+# For CA coordinates (3D, zero COM, log schedule) - la-proteina defaults
+P_ca = RDNFlow(3; zero_com=true, schedule=:log, schedule_param=2.0,
+               sde_gt_mode=Symbol("1/t"), sde_gt_param=1.0,
                sc_scale_noise=0.1, sc_scale_score=1.0, t_lim_ode=0.98)
 
-# For local latents (8D, no zero COM) - la-proteina defaults
-P_latent = RDNFlow(8; zero_com=false, sde_gt_mode=:tan, sde_gt_param=1.0,
+# For local latents (8D, no zero COM, power schedule) - la-proteina defaults
+P_latent = RDNFlow(8; zero_com=false, schedule=:power, schedule_param=2.0,
+                   sde_gt_mode=:tan, sde_gt_param=1.0,
                    sc_scale_noise=0.1, sc_scale_score=1.0, t_lim_ode=0.98)
 
 # Combined product space (use tuple)
@@ -41,6 +52,8 @@ P = (P_ca, P_latent)
 struct RDNFlow{T<:Real} <: Process
     dim::Int
     zero_com::Bool
+    schedule::Symbol
+    schedule_param::T
     sde_gt_mode::Symbol
     sde_gt_param::T
     sc_scale_noise::T
@@ -48,11 +61,53 @@ struct RDNFlow{T<:Real} <: Process
     t_lim_ode::T
 end
 
-function RDNFlow(dim::Int; zero_com::Bool=false, sde_gt_mode::Symbol=:const,
+function RDNFlow(dim::Int; zero_com::Bool=false, schedule::Symbol=:linear,
+                 schedule_param::Real=1.0f0, sde_gt_mode::Symbol=:const,
                  sde_gt_param::Real=1.0f0, sc_scale_noise::Real=0.0f0,
                  sc_scale_score::Real=1.0f0, t_lim_ode::Real=1.0f0)
-    RDNFlow(dim, zero_com, sde_gt_mode, Float32(sde_gt_param),
-            Float32(sc_scale_noise), Float32(sc_scale_score), Float32(t_lim_ode))
+    RDNFlow(dim, zero_com, schedule, Float32(schedule_param), sde_gt_mode,
+            Float32(sde_gt_param), Float32(sc_scale_noise), Float32(sc_scale_score),
+            Float32(t_lim_ode))
+end
+
+"""
+    schedule_transform(P::RDNFlow, u)
+
+Transform uniform progress u ∈ [0,1] to actual interpolation time τ(u).
+
+Supported schedules:
+- `:linear` - τ(u) = u
+- `:power` - τ(u) = u^p (stays at low t longer)
+- `:log` - τ(u) = (1 - 10^(-p*u)) / (1 - 10^(-p)) (reaches high t quickly)
+"""
+function schedule_transform(P::RDNFlow, u::T) where T<:Real
+    p = T(P.schedule_param)
+    if P.schedule == :linear
+        return u
+    elseif P.schedule == :power
+        return u^p
+    elseif P.schedule == :log
+        # τ(u) = (1 - 10^(-p*u)) / (1 - 10^(-p))
+        denom = one(T) - T(10)^(-p)
+        return (one(T) - T(10)^(-p * u)) / denom
+    else
+        error("Unknown schedule: $(P.schedule)")
+    end
+end
+
+# Vectorized version
+function schedule_transform(P::RDNFlow, u::AbstractArray{T}) where T<:Real
+    p = T(P.schedule_param)
+    if P.schedule == :linear
+        return u
+    elseif P.schedule == :power
+        return u .^ p
+    elseif P.schedule == :log
+        denom = one(T) - T(10)^(-p)
+        return (one(T) .- T(10) .^ (-p .* u)) ./ denom
+    else
+        error("Unknown schedule: $(P.schedule)")
+    end
 end
 
 """
@@ -103,15 +158,27 @@ function _force_zero_com(x::AbstractArray{T}, mask=nothing) where T
     end
 end
 
-# Bridge implementation - linear interpolation
-# The default Deterministic bridge does this, but we override to handle zero-COM
-function ForwardBackward.endpoint_conditioned_sample(X0::ContinuousState, X1::ContinuousState, P::RDNFlow, tF, tB)
-    T = eltype(tF)
-    d = ndims(X0.state)
-    t0_exp = expand(tF ./ (tF .+ tB), d)  # Weight for X1
-    t1_exp = expand(one(T) .- t0_exp, d)   # Weight for X0
+# Bridge implementation - scheduled interpolation
+# The schedule transforms uniform progress u to actual interpolation time τ(u)
 
-    result = X0.state .* t1_exp .+ X1.state .* t0_exp
+"""
+    rdn_bridge(P::RDNFlow, X0::ContinuousState, X1::ContinuousState, u)
+
+Bridge from X0 to X1 at uniform progress u ∈ [0,1].
+The actual interpolation uses τ(u) where τ is the schedule transform.
+Result: X_τ = (1-τ(u))*X0 + τ(u)*X1
+"""
+function rdn_bridge(P::RDNFlow, X0::ContinuousState, X1::ContinuousState, u)
+    T = eltype(tensor(X0))
+    d = ndims(X0.state)
+
+    # Apply schedule transform to get actual interpolation time
+    tau = schedule_transform(P, T.(u))
+
+    tau_exp = expand(tau, d)
+    one_minus_tau = expand(one(T) .- tau, d)
+
+    result = X0.state .* one_minus_tau .+ X1.state .* tau_exp
 
     if P.zero_com
         result = _force_zero_com(result, nothing)
@@ -120,10 +187,26 @@ function ForwardBackward.endpoint_conditioned_sample(X0::ContinuousState, X1::Co
     return ContinuousState(result)
 end
 
-# 3-arg version for compatibility
+# Override endpoint_conditioned_sample for ForwardBackward compatibility
+function ForwardBackward.endpoint_conditioned_sample(X0::ContinuousState, X1::ContinuousState, P::RDNFlow, tF, tB)
+    T = eltype(tF)
+    # tF and tB represent forward/backward times. Compute uniform progress u.
+    u = tF ./ (tF .+ tB)
+    return rdn_bridge(P, X0, X1, u)
+end
+
+# 3-arg version for compatibility (t is uniform progress)
 function ForwardBackward.endpoint_conditioned_sample(X0::ContinuousState, X1::ContinuousState, P::RDNFlow, t)
+    return rdn_bridge(P, X0, X1, t)
+end
+
+# 6-arg version needed by Flowfusion.bridge
+function ForwardBackward.endpoint_conditioned_sample(X0::ContinuousState, X1::ContinuousState, P::RDNFlow, t0, t, t1)
+    # t0 is start time (usually 0), t is current time, t1 is end time (usually 1)
+    # Compute progress as (t - t0) / (t1 - t0)
     T = eltype(t)
-    return endpoint_conditioned_sample(X0, X1, P, t, clamp.(one(T) .- t, T(0), T(1)))
+    u = (t .- t0) ./ (t1 .- t0 .+ T(1e-8))
+    return rdn_bridge(P, X0, X1, u)
 end
 
 # Loss scaling for RDNFlow - same as other continuous processes
@@ -251,38 +334,45 @@ end
 """
     step(P::RDNFlow, Xₜ::ContinuousState, X̂₁::ContinuousState, s₁, s₂)
 
-Single step for flow matching. Moves from time s₁ to s₂.
+Single step for flow matching. Moves from uniform progress s₁ to s₂.
 X̂₁ is the predicted endpoint (X1 prediction from the model).
 
-If P.sc_scale_noise > 0 and t < P.t_lim_ode, uses SDE sampling:
-    dx = [v + g(t) * sc_scale_score * score] dt + sqrt(2 * g(t) * sc_scale_noise) dW
+The actual interpolation times are τ(s₁) and τ(s₂) where τ is the schedule transform.
+The step size in actual time is dτ = τ(s₂) - τ(s₁).
+
+If P.sc_scale_noise > 0 and τ < P.t_lim_ode, uses SDE sampling:
+    dx = [v + g(τ) * sc_scale_score * score] dτ + sqrt(2 * g(τ) * sc_scale_noise) dW
 
 Otherwise uses deterministic ODE:
-    dx = v * dt
+    dx = v * dτ
 
-The noise schedule g(t) is controlled by P.sde_gt_mode and P.sde_gt_param.
-Switches to pure ODE when t >= P.t_lim_ode.
+The noise schedule g(τ) is controlled by P.sde_gt_mode and P.sde_gt_param.
+Switches to pure ODE when τ >= P.t_lim_ode.
 """
 function step(P::RDNFlow, Xₜ::ContinuousState, X̂₁::ContinuousState, s₁, s₂)
     T = eltype(tensor(Xₜ))
-    dt = T(s₂) - T(s₁)
-    t = T(s₁)
+
+    # s₁ and s₂ are uniform progress values; convert to actual interpolation times
+    tau1 = schedule_transform(P, T(s₁))
+    tau2 = schedule_transform(P, T(s₂))
+    dtau = tau2 - tau1
 
     xt = tensor(Xₜ)
     x1 = tensor(X̂₁)
 
-    # Velocity: v = (x1 - xt) / (1 - t)
-    v = x1_to_v(xt, x1, t)
+    # Velocity: v = (x1 - xt) / (1 - τ)
+    # This is dx/dτ, so we integrate: x_new = xt + v * dτ
+    v = x1_to_v(xt, x1, tau1)
 
-    # Check if we should use SDE or ODE
-    use_sde = P.sc_scale_noise > T(1e-8) && t < P.t_lim_ode
+    # Check if we should use SDE or ODE (based on actual time τ)
+    use_sde = P.sc_scale_noise > T(1e-8) && tau1 < P.t_lim_ode
 
     if use_sde
-        # Compute g(t) for SDE noise
-        gt = _compute_gt(P, t)
+        # Compute g(τ) for SDE noise
+        gt = _compute_gt(P, tau1)
 
-        # SDE step: dx = [v + g(t) * sc_scale_score * score] dt + sqrt(2 * g(t) * sc_scale_noise) dW
-        score = vf_to_score(xt, v, t)
+        # SDE step: dx = [v + g(τ) * sc_scale_score * score] dτ + sqrt(2 * g(τ) * sc_scale_noise) dW
+        score = vf_to_score(xt, v, tau1)
 
         # Deterministic drift with scaled score
         drift = v .+ gt .* T(P.sc_scale_score) .* score
@@ -293,14 +383,14 @@ function step(P::RDNFlow, Xₜ::ContinuousState, X̂₁::ContinuousState, s₁, 
             noise = _force_zero_com(noise, nothing)
         end
         # Ensure diffusion coefficient is non-negative
-        diffusion_var = max(T(0), T(2) * gt * T(P.sc_scale_noise) * abs(dt))
+        diffusion_var = max(T(0), T(2) * gt * T(P.sc_scale_noise) * abs(dtau))
         diffusion_coef = sqrt(diffusion_var)
         diffusion = diffusion_coef .* noise
 
-        x_new = xt .+ drift .* dt .+ diffusion
+        x_new = xt .+ drift .* dtau .+ diffusion
     else
-        # Pure ODE step: dx = v * dt
-        x_new = xt .+ v .* dt
+        # Pure ODE step: dx = v * dτ
+        x_new = xt .+ v .* dtau
     end
 
     # Enforce zero center of mass if needed
