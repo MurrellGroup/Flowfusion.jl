@@ -337,6 +337,8 @@ end
                                                       T(0.4)  T(0.1) T(0.2) T(0.3) T(-1.0)]), DiscreteDomain(5, 3, 1200), true),
         BridgeCase("manifold_torus", ManifoldProcess(T(0.2)), ManifoldDomain(Torus(2), 256), true),
         BridgeCase("manifold_so3", ManifoldProcess(T(0.2)), ManifoldDomain(SpecialOrthogonal(3), 128), true),
+        BridgeCase("manifold_torus_ouexpvar", ManifoldProcess(OUBridgeExpVar(T(1.0), T(1.5), T(1e-9); dec = T(-3.0))), ManifoldDomain(Torus(2), 256), true),
+        BridgeCase("manifold_so3_ouexpvar", ManifoldProcess(OUBridgeExpVar(T(1.0), T(1.5), T(1e-9); dec = T(-3.0))), ManifoldDomain(SpecialOrthogonal(3), 128), true),
     ]
 
     for case in cases
