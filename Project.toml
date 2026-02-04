@@ -16,7 +16,7 @@ StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 [compat]
 Adapt = "4.1.1"
 Distributions = "0.25.120"
-ForwardBackward = "0.1.0"
+ForwardBackward = "0.1.5"
 LogExpFunctions = "0.3.29"
 Manifolds = "0.10.12"
 NNlib = "0.9.27"
