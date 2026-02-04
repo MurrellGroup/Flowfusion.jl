@@ -42,6 +42,8 @@ using ForwardBackward
         end
     end
 
+    include("bridge_step_equivalence.jl")
+
     @testset "Bridge, step" begin
 
         siz = (5,6)
