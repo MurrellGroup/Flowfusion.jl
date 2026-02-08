@@ -180,6 +180,9 @@ function rdn_bridge(P::RDNFlow, X0::ContinuousState, X1::ContinuousState, u)
 
     result = X0.state .* one_minus_tau .+ X1.state .* tau_exp
 
+    # TODO: remove the size(result, 2) > 1 guard. zero_com should work for
+    # single-position states or callers should set zero_com=false. This is a
+    # temporary workaround we haven't been able to test removing yet.
     if P.zero_com && size(result, 2) > 1
         result = _force_zero_com(result, nothing)
     end
