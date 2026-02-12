@@ -52,6 +52,9 @@ UState = Union{State,MaskedState, Guide}
 #This is for all Flow types where the mixture probabilities are directly defined, and the gen is done via probability velocities.
 abstract type ConvexInterpolatingDiscreteFlow <: DiscreteProcess end #https://arxiv.org/pdf/2407.15595
 
+# Edit-based discrete processes (insert/substitute/delete)
+abstract type DiscreteIndelProcess <: DiscreteProcess end
+
 struct InterpolatingDiscreteFlow <: ConvexInterpolatingDiscreteFlow
     κ::Function
     κ̇::Function
