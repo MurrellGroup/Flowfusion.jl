@@ -388,4 +388,25 @@ using ForwardBackward
             end
         end
     end
+
+    @testset "ModPIP" begin
+        @testset "Exact targets agree with sampled alignments" begin
+            p = ModPIPProcess(6; lambda = 0.3, mu = 0.3)
+            v = validate_targets_vs_sampling(p, [1, 1, 2, 3], [1, 4, 3, 5], 0.4; N = 2_000, seed = 1)
+            @test v.del_max ≤ 0.02
+            @test v.sub_max ≤ 0.02
+            @test v.insc_max ≤ 0.02
+            @test v.ins_max ≤ 0.15
+        end
+
+        for prex0 in ([1], [1, 2], [1, 2, 4]), prex1 in ([1], [2], [1, 2], [1, 4])
+            @testset "Bridge vs Step marginal consistency $prex0 -> $prex1" begin
+                p = ModPIPProcess(6; lambda = 0.05, mu = 0.05)
+                x0 = DiscreteState(6, prex0)
+                x1 = DiscreteState(6, prex1)
+                tv = validate_bridge_step_consistency(p, x0, x1; times = [0.2, 0.5, 0.8], Nbridge = 300, Nstep = 300, dt = 0.01, seed = 1)
+                @test maximum(values(tv)) ≤ 0.18
+            end
+        end
+    end
 end

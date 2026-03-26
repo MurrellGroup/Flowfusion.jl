@@ -29,6 +29,8 @@ include("processes.jl")
 include("doob.jl")
 include("batching.jl")
 include("poissonindelprocess.jl")
+include("modpip.jl")
+using .ModPIP: ModPIPProcess, bridge_with_targets, exact_targets, validate_targets_vs_sampling, validate_bridge_step_consistency
 
 export
     #Processes not in ForwardBackward.jl
@@ -36,6 +38,7 @@ export
     NoisyInterpolatingDiscreteFlow,
     DoobMatchingFlow,
     UniformDiscretePoissonIndelProcess,
+    ModPIPProcess,
     MaskedState,
     Guide,
     tangent_guide,
@@ -51,7 +54,11 @@ export
     tcloss,
     dense,
     batch,
-    regroup
+    regroup,
+    bridge_with_targets,
+    exact_targets,
+    validate_targets_vs_sampling,
+    validate_bridge_step_consistency
 
 
 #Useful for demos etc:

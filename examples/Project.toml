@@ -1,4 +1,5 @@
 [deps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Flowfusion = "5b4e93c8-7b6e-4682-b400-fc3b238f52b1"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
 ForwardBackward = "e879419d-bb0f-4252-adee-d266c51ac92d"
