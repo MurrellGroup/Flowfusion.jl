@@ -33,6 +33,7 @@ include("batching.jl")
 include("indel.jl")
 include("dist_dfm.jl")
 include("rdn_flow.jl")
+include("rdn_exact_sde_flow.jl")
 
 export
     #Processes not in ForwardBackward.jl
@@ -41,6 +42,7 @@ export
     DoobMatchingFlow,
     OUFlow,
     RDNFlow,
+    RDNExactSDEFlow,
     sample_rdn_noise,
     schedule_transform,
     rdn_bridge,

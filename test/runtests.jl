@@ -43,6 +43,7 @@ using ForwardBackward
     end
 
     include("test_rdn_schedule.jl")
+    include("test_rdn_exact_sde.jl")
 
     @testset "Bridge, step" begin
 
