@@ -74,3 +74,21 @@ struct OUFlow{T} <: Process
 end
 
 OUFlow(θ::T, v_at_0::T) where T = OUFlow(θ, v_at_0, T(1e-2), T(-0.1))
+
+"""
+    VPCosineFlow(n_timestep)
+    VPCosineFlow()
+
+Endpoint-conditioned flow induced by a cosine variance-preserving diffusion
+schedule. Flow time runs from `0` (maximally noised) to `1` (clean endpoint).
+
+The cumulative signal power is
+`cos(((1 - t) * n_timestep / (n_timestep + 1)) * pi / 2)^2`.
+"""
+struct VPCosineFlow <: ForwardBackward.ContinuousProcess
+    n_timestep::Int
+    function VPCosineFlow(n_timestep::Integer=1000)
+        n_timestep > 0 || throw(ArgumentError("n_timestep must be positive"))
+        return new(Int(n_timestep))
+    end
+end

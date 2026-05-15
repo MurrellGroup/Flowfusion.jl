@@ -2,6 +2,91 @@
 #For processes that aren't used elsewhere
 ##########################################
 
+function _vp_check_flow_time(t::Real)
+    0 <= t <= 1 || throw(ArgumentError("flow time must be in [0, 1], got $t"))
+    return nothing
+end
+
+function _vp_check_flow_time(t::AbstractArray)
+    all((0 .<= t) .& (t .<= 1)) ||
+        throw(ArgumentError("all flow times must be in [0, 1]"))
+    return nothing
+end
+
+function _vp_check_clean_endpoint(t)
+    vals = t isa Real ? (t,) : t
+    all(x -> isapprox(float(x), 1.0; atol=sqrt(eps(float(x)))), vals) ||
+        throw(ArgumentError("VPCosineFlow expects endpoint time 1"))
+    return nothing
+end
+
+"""
+    vp_alpha_bar(P::VPCosineFlow, t)
+
+Return the cumulative signal power of the cosine VP schedule at flow time `t`.
+Flow time is oriented so that `t=0` is noisiest and `t=1` is the clean endpoint.
+"""
+function vp_alpha_bar(P::VPCosineFlow, t)
+    _vp_check_flow_time(t)
+    diffusion_index = (1 .- t) .* P.n_timestep
+    angle = diffusion_index ./ (P.n_timestep + 1) .* (pi / 2)
+    return cos.(angle) .^ 2
+end
+
+"""
+    vp_bridge_coefficients(P::VPCosineFlow, s, t)
+
+Coefficients for the exact endpoint-conditioned transition `x_t | x_s, x_1`
+under the VP schedule, for flow times `0 <= s <= t <= 1`.
+
+Returns `(coef_x1, coef_xs, variance)` such that
+`x_t = coef_x1 * x_1 + coef_xs * x_s + sqrt(variance) * z`.
+The inputs may be scalars or broadcast-compatible arrays.
+"""
+function vp_bridge_coefficients(P::VPCosineFlow, s, t)
+    _vp_check_flow_time(s)
+    _vp_check_flow_time(t)
+    all(s .<= t) || throw(ArgumentError("expected s <= t for x_t | x_s, x_1"))
+
+    A_s = vp_alpha_bar(P, s)
+    A_t = vp_alpha_bar(P, t)
+    denom = max.(1 .- A_s, eps(Float64))
+    ratio = clamp.(A_s ./ A_t, 0, 1)
+
+    coef_x1 = sqrt.(A_t) .* (1 .- ratio) ./ denom
+    coef_xs = sqrt.(ratio) .* (1 .- A_t) ./ denom
+    variance = (1 .- A_t) .* (1 .- ratio) ./ denom
+    return coef_x1, coef_xs, max.(variance, 0)
+end
+
+function ForwardBackward.endpoint_conditioned_sample(
+    Xa::ContinuousState,
+    Xc::ContinuousState,
+    P::VPCosineFlow,
+    t_a,
+    t_b,
+    t_c,
+)::ContinuousState
+    size(Xa.state) == size(Xc.state) ||
+        throw(DimensionMismatch("Xa and Xc must have the same state shape"))
+    _vp_check_clean_endpoint(t_c)
+
+    xa = Xa.state
+    xc = Xc.state
+    nd = ndims(xa)
+    ta = expand(t_a, nd)
+    tb = expand(t_b, nd)
+    _vp_check_flow_time(ta)
+    _vp_check_flow_time(tb)
+    all(ta .<= tb) || throw(ArgumentError("expected t_a <= t_b"))
+
+    coef_x1, coef_xa, variance = vp_bridge_coefficients(P, ta, tb)
+    mu = coef_x1 .* xc .+ coef_xa .* xa
+    noise = randn(eltype(xa), size(xa)...)
+    xb = mu .+ sqrt.(variance) .* noise
+    return ContinuousState(xb)
+end
+
 ##########################################
 #https://arxiv.org/pdf/2407.15595
 ##########################################
@@ -134,4 +219,3 @@ function bridge(P::OUFlow, X0, X1, t0, t)
     OU = OrnsteinUhlenbeckExpVar(tensor(X1), P.θ, P.v_at_0, P.v_at_1, dec = P.dec) #<-Note X1 as mean
     endpoint_conditioned_sample(X0, X1, OU, t0, t, eltype(t)(1))
 end
-
