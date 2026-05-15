@@ -76,19 +76,34 @@ end
 OUFlow(θ::T, v_at_0::T) where T = OUFlow(θ, v_at_0, T(1e-2), T(-0.1))
 
 """
-    VPCosineFlow(n_timestep)
-    VPCosineFlow()
+    CosineVPSchedule(n_timestep)
+    CosineVPSchedule()
 
-Endpoint-conditioned flow induced by a cosine variance-preserving diffusion
-schedule. Flow time runs from `0` (maximally noised) to `1` (clean endpoint).
-
-The cumulative signal power is
-`cos(((1 - t) * n_timestep / (n_timestep + 1)) * pi / 2)^2`.
+Cosine cumulative signal-power schedule for `VPFlow`. Flow time runs from `0`
+(maximally noised) to `1` (clean endpoint), with
+`alpha_bar(t) = cos(((1 - t) * n_timestep / (n_timestep + 1)) * pi / 2)^2`.
 """
-struct VPCosineFlow <: ForwardBackward.ContinuousProcess
+struct CosineVPSchedule
     n_timestep::Int
-    function VPCosineFlow(n_timestep::Integer=1000)
+    function CosineVPSchedule(n_timestep::Integer=1000)
         n_timestep > 0 || throw(ArgumentError("n_timestep must be positive"))
         return new(Int(n_timestep))
     end
 end
+
+"""
+    VPFlow(alpha_bar)
+    VPFlow()
+
+Endpoint-conditioned flow induced by a variance-preserving diffusion schedule.
+`alpha_bar` is any callable cumulative signal-power schedule with values in
+`[0, 1]`, increasing from noisy flow time `0` to clean flow time `1`.
+
+`VPFlow()` uses `CosineVPSchedule()` and recovers the cosine VP bridge currently
+used by Branching Genie.
+"""
+struct VPFlow{S} <: ForwardBackward.ContinuousProcess
+    alpha_bar::S
+end
+
+VPFlow() = VPFlow(CosineVPSchedule())

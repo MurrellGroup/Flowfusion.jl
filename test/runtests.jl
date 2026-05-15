@@ -53,7 +53,7 @@ using ForwardBackward
         XR() = ManifoldState(MR, [rand(MR) for _ in zeros(siz...)])
 
         for (f,p) in [(XC, BrownianMotion()),
-                    (XC, VPCosineFlow()),
+                    (XC, VPFlow()),
                     (XT, ManifoldProcess(1)),
                     (XR, ManifoldProcess(1)),
                     (XD, InterpolatingDiscreteFlow())]
@@ -86,14 +86,15 @@ using ForwardBackward
 
     end
 
-    @testset "VP cosine flow" begin
-        P = VPCosineFlow(1000)
+    @testset "VP flow" begin
+        P = VPFlow(CosineVPSchedule(1000))
 
         @test isapprox(vp_alpha_bar(P, 1.0), 1.0; atol=1e-12)
         @test vp_alpha_bar(P, 0.0) < 3e-6
         @test 0.49 < vp_alpha_bar(P, 0.5) < 0.51
         @test_throws ArgumentError vp_alpha_bar(P, -0.01)
         @test_throws ArgumentError vp_alpha_bar(P, 1.01)
+        @test vp_alpha_bar(VPFlow(t -> t), 0.25) == 0.25
 
         for (s, t, u) in ((0.0, 0.2, 0.7), (0.05, 0.4, 0.95), (0.33, 0.66, 1.0))
             a_st, b_st, v_st = vp_bridge_coefficients(P, s, t)
@@ -124,5 +125,16 @@ using ForwardBackward
 
         @test_throws ArgumentError bridge(P, Xa, X1, 0.5, 0.4)
         @test_throws ArgumentError ForwardBackward.endpoint_conditioned_sample(Xa, X1, P, 0.0, 0.5, 0.9)
+
+        P_linear = VPFlow(t -> t)
+        Xt0 = bridge(P_linear, Xa, X1, 0.0, 0.0)
+        @test tensor(Xt0) ≈ tensor(Xa)
+        Xlin = bridge(P_linear, Xa, X1, 0.0, 0.6)
+        @test size(tensor(Xlin)) == size(tensor(Xa))
+        Xlin_clean = bridge(P_linear, Xa, X1, 0.25, 1.0)
+        @test tensor(Xlin_clean) ≈ tensor(X1)
+
+        P_bad = VPFlow(t -> 1 - t)
+        @test_throws ArgumentError bridge(P_bad, Xa, X1, 0.2, 0.4)
     end
 end
