@@ -2,6 +2,113 @@
 #For processes that aren't used elsewhere
 ##########################################
 
+function _vp_check_flow_time(t::Real)
+    0 <= t <= 1 || throw(ArgumentError("flow time must be in [0, 1], got $t"))
+    return nothing
+end
+
+function _vp_check_flow_time(t::AbstractArray)
+    all((0 .<= t) .& (t .<= 1)) ||
+        throw(ArgumentError("all flow times must be in [0, 1]"))
+    return nothing
+end
+
+function _vp_check_clean_endpoint(t)
+    vals = t isa Real ? (t,) : t
+    all(x -> isapprox(float(x), 1.0; atol=sqrt(eps(float(x)))), vals) ||
+        throw(ArgumentError("VPFlow expects endpoint time 1"))
+    return nothing
+end
+
+_vp_eps(x::Real) = eps(typeof(float(one(typeof(x)))))
+_vp_eps(x::AbstractArray) = eps(typeof(float(one(eltype(x)))))
+_vp_eps(x, y) = max(_vp_eps(x), _vp_eps(y))
+
+"""
+    vp_alpha_bar(P::VPFlow, t)
+
+Return the cumulative signal power of the VP schedule at flow time `t`.
+Flow time is oriented so that `t=0` is noisiest and `t=1` is the clean endpoint.
+"""
+function (S::CosineVPSchedule)(t)
+    diffusion_index = (1 .- t) .* S.n_timestep
+    angle = diffusion_index ./ (S.n_timestep + 1) .* (pi / 2)
+    return cos.(angle) .^ 2
+end
+
+function vp_alpha_bar(P::VPFlow, t)
+    _vp_check_flow_time(t)
+    alpha_bar = P.alpha_bar.(t)
+    all((0 .<= alpha_bar) .& (alpha_bar .<= 1)) ||
+        throw(ArgumentError("VP alpha_bar schedule must return values in [0, 1]"))
+    return alpha_bar
+end
+
+"""
+    vp_bridge_coefficients(P::VPFlow, s, t)
+
+Coefficients for the exact endpoint-conditioned transition `x_t | x_s, x_1`
+under the VP schedule, for flow times `0 <= s <= t <= 1`.
+
+Returns `(coef_x1, coef_xs, variance)` such that
+`x_t = coef_x1 * x_1 + coef_xs * x_s + sqrt(variance) * z`.
+The inputs may be scalars or broadcast-compatible arrays.
+"""
+function vp_bridge_coefficients(P::VPFlow, s, t)
+    _vp_check_flow_time(s)
+    _vp_check_flow_time(t)
+    eps_t = _vp_eps(s, t)
+    all(s .<= t .+ sqrt(eps_t)) ||
+        throw(ArgumentError("expected s <= t for x_t | x_s, x_1"))
+
+    A_s = vp_alpha_bar(P, s)
+    A_t = vp_alpha_bar(P, t)
+    eps_a = _vp_eps(A_s, A_t)
+    same_time = abs.(t .- s) .<= sqrt(eps_t)
+    all(same_time .| (A_s .<= A_t)) ||
+        throw(ArgumentError("VP alpha_bar schedule must be nondecreasing"))
+    denom = max.(1 .- A_s, eps_a)
+    ratio_raw = A_s ./ max.(A_t, eps_a)
+    ratio = ifelse.(same_time, 1, clamp.(ratio_raw, 0, 1))
+
+    coef_x1 = ifelse.(same_time, 0, sqrt.(A_t) .* (1 .- ratio) ./ denom)
+    coef_xs = ifelse.(same_time, 1, sqrt.(ratio) .* (1 .- A_t) ./ denom)
+    variance = ifelse.(same_time, 0, (1 .- A_t) .* (1 .- ratio) ./ denom)
+    return coef_x1, coef_xs, max.(variance, 0)
+end
+
+function ForwardBackward.endpoint_conditioned_sample(
+    Xa::ContinuousState,
+    Xc::ContinuousState,
+    P::VPFlow,
+    t_a,
+    t_b,
+    t_c,
+)::ContinuousState
+    size(Xa.state) == size(Xc.state) ||
+        throw(DimensionMismatch("Xa and Xc must have the same state shape"))
+    _vp_check_clean_endpoint(t_c)
+
+    xa = Xa.state
+    xc = Xc.state
+    nd = ndims(xa)
+    ta = expand(t_a, nd)
+    tb = expand(t_b, nd)
+    _vp_check_flow_time(ta)
+    _vp_check_flow_time(tb)
+    all(ta .<= tb) || throw(ArgumentError("expected t_a <= t_b"))
+
+    coef_x1, coef_xa, variance = vp_bridge_coefficients(P, ta, tb)
+    T = eltype(xa)
+    coef_x1 = T.(coef_x1)
+    coef_xa = T.(coef_xa)
+    variance = max.(T.(variance), zero(T))
+    mu = coef_x1 .* xc .+ coef_xa .* xa
+    noise = randn(T, size(xa)...)
+    xb = mu .+ sqrt.(variance) .* noise
+    return ContinuousState(xb)
+end
+
 ##########################################
 #https://arxiv.org/pdf/2407.15595
 ##########################################
@@ -134,4 +241,3 @@ function bridge(P::OUFlow, X0, X1, t0, t)
     OU = OrnsteinUhlenbeckExpVar(tensor(X1), P.θ, P.v_at_0, P.v_at_1, dec = P.dec) #<-Note X1 as mean
     endpoint_conditioned_sample(X0, X1, OU, t0, t, eltype(t)(1))
 end
-
